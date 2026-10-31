@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Зуфирки</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #06081e; overflow: hidden; touch-action: none;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent; }
+  canvas { position: absolute; display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+
+// ======================= ЛОГИКА ИГРЫ =======================
+const CURRENCY = 'Зуфирки';
+const STAGES = [
+  { name: 'Зуфирка', mult: 1, cost: 0 },
+  { name: '3 зуфирки', mult: 3, cost: 150 },
+  { name: 'Пачка зуфирок', mult: 10, cost: 1500 },
+  { name: '3 упаковки зуфирок', mult: 30, cost: 15000 },
+  { name: 'Пакет зуфирок', mult: 100, cost: 150000 },
+  { name: 'Коробка зуфирок', mult: 300, cost: 2000000 },
+  { name: 'Газель с зуфирками', mult: 1000, cost: 25000000 },
+  { name: 'Газель с коробками зуфирок', mult: 3000, cost: 300000000 },
+  { name: 'Титаник с зуфирками', mult: 10000, cost: 4000000000 },
+  { name: 'Титаник с коробками зуфирок', mult: 30000, cost: 50000000000 },
+  { name: 'Титаник с контейнерами зуфирок', mult: 100000, cost: 600000000000 },
+  { name: 'Чёрная дыра зуфирок', mult: 1000000, cost: 5000000000000 },
+];
+const POWER_BASE_COST = 10, POWER_GROWTH = 1.4;
+const AUTO_BASE_COST = 50, AUTO_GROWTH = 1.5;
+const SAVE_KEY = 'zufirki_save_v1';
+
+class Game {
+  constructor() {
+    this.coins = 0; this.total = 0; this.stage = 0;
+    this.powerLevel = 0; this.autoLevel = 0; this._acc = 0;
+  }
+  get baseReward() { return 1 + this.powerLevel; }
+  get clickReward() { return this.baseReward * STAGES[this.stage].mult; }
+  get perSecond() { return this.autoLevel * this.clickReward; }
+  get powerCost() { return Math.floor(POWER_BASE_COST * Math.pow(POWER_GROWTH, this.powerLevel)); }
+  get autoCost() { return Math.floor(AUTO_BASE_COST * Math.pow(AUTO_GROWTH, this.autoLevel)); }
+  get nextStage() { return this.stage + 1 < STAGES.length ? STAGES[this.stage + 1] : null; }
+  click() { const g = this.clickReward; this.coins += g; this.total += g; return g; }
+  tick(dt) {
+    if (this.autoLevel <= 0) return 0;
+    this._acc += dt * this.autoLevel;
+    const clicks = Math.floor(this._acc);
+    if (clicks <= 0) return 0;
+    this._acc -= clicks;
+    const gain = clicks * this.clickReward;
+    this.coins += gain; this.total += gain;
+    return gain;
+  }
+  _buy(cost) { if (this.coins >= cost) { this.coins -= cost; return true; } return false; }
+  buyPower() { if (this._buy(this.powerCost)) { this.powerLevel++; return true; } return false; }
+  buyAuto() { if (this._buy(this.autoCost)) { this.autoLevel++; return true; } return false; }
+  buyStage() {
+    const n = this.nextStage;
+    if (n && this._buy(n.cost)) { this.stage++; return true; }
+    return false;
+  }
+  toJSON() {
+    return JSON.stringify({ version: 1, coins: this.coins, total: this.total, stage: this.stage,
+      power_level: this.powerLevel, auto_level: this.autoLevel });
+  }
+  load(text) {
+    let d;
+    try { d = JSON.parse(text); } catch (e) { return false; }
+    if (!d || typeof d !== 'object') return false;
+    const num = (v, def) => { const n = Number(v); return Number.isFinite(n) ? n : def; };
+    this.coins = Math.max(0, num(d.coins, 0));
+    this.total = Math.max(0, num(d.total, 0));
+    this.stage = Math.max(0, Math.min(Math.floor(num(d.stage, 0)), STAGES.length - 1));
+    this.powerLevel = Math.max(0, Math.floor(num(d.power_level, 0)));
+    this.autoLevel = Math.max(0, Math.floor(num(d.auto_level, 0)));
+    return true;
+  }
+}
+
+const SUFFIXES = [['Qi', 1e18], ['Qa', 1e15], ['T', 1e12], ['B', 1e9], ['M', 1e6], ['K', 1e3]];
+function fmt(n) {
+  n = Number(n);
+  for (const [suf, size] of SUFFIXES) {
+    if (n >= size) {
+      let s = (n / size).toFixed(1);
+      if (s.endsWith('.0')) s = s.slice(0, -2);
+      return s + suf;
+    }
+  }
+  return String(Math.floor(n));
+}
+
+// ======================= СОХРАНЕНИЕ =======================
+// В приложении Android прогресс лежит в SharedPreferences (мост AndroidBridge),
+// в браузере — в localStorage. Пишем в оба места.
+const bridge = window.AndroidBridge || null;
+function readSave() {
+  try { if (bridge) { const t = bridge.load(); if (t) return t; } } catch (e) {}
+  try { return localStorage.getItem(SAVE_KEY); } catch (e) { return null; }
+}
+function writeSave(game) {
+  const text = game.toJSON();
+  try { if (bridge) bridge.save(text); } catch (e) {}
+  try { localStorage.setItem(SAVE_KEY, text); } catch (e) {}
+}
+
+// ======================= ХОЛСТ И РАСКЛАДКА =======================
+const W = 540;
+let H = 960;                       // логическая высота подстраивается под экран телефона
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let pxScale = 1;                   // физических пикселей на логический
+let SPR_SS = 2;                    // во сколько раз крупнее рисуются спрайты зуфирок
+let L = {};                        // раскладка
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+function computeLayout() {
+  const shopTop = H - 465;
+  const areaTop = 125, areaBottom = shopTop - 80;
+  L = {
+    shopTop,
+    itemCY: Math.round((areaTop + areaBottom) / 2) + 10,
+    itemScale: clamp((areaBottom - areaTop) / 290, 0.8, 1.1),
+    nameY: shopTop - 63,
+    infoY: shopTop - 29,
+  };
+  L.itemRect = [60, L.itemCY - 150 * L.itemScale, 420, 290 * L.itemScale];
+  const bx = 20, bw = W - 40, bh = 112, gap = 14, y0 = shopTop + 49;
+  L.buttons = {
+    stage: [bx, y0, bw, bh],
+    power: [bx, y0 + bh + gap, bw, bh],
+    auto: [bx, y0 + 2 * (bh + gap), bw, bh],
+  };
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  H = clamp(Math.round(W * vh / vw), 900, 1300);
+  const scale = Math.min(vw / W, vh / H);
+  const cssW = W * scale, cssH = H * scale;
+  cv.style.width = cssW + 'px';
+  cv.style.height = cssH + 'px';
+  cv.style.left = ((vw - cssW) / 2) + 'px';
+  cv.style.top = ((vh - cssH) / 2) + 'px';
+  cv.width = Math.round(cssW * dpr);
+  cv.height = Math.round(cssH * dpr);
+  pxScale = cv.width / W;
+  const ss = clamp(Math.round(pxScale), 2, 3);
+  if (ss !== SPR_SS) { SPR_SS = ss; spriteCache.clear(); }
+  computeLayout();
+  space.rebuild();
+}
+
+// ======================= ПРИМИТИВЫ РИСОВАНИЯ =======================
+const css = (c, a) => a === undefined ? `rgb(${c[0]},${c[1]},${c[2]})` : `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const lerpC = (a, b, t) => [0, 1, 2].map(i => Math.round(a[i] + (b[i] - a[i]) * t));
+const shadeC = (c, k) => c.map(v => Math.round(v * k));
+
+const STRAND = [[255, 140, 188], [112, 188, 255], [255, 224, 112]];   // розовый, голубой, жёлтый
+const CORE = [255, 249, 255];
+const OUTLINE = [58, 34, 104];
+const NEON = [90, 225, 255];
+const GOLD = [255, 225, 120];
+const VIOLET = [96, 66, 196];
+const INDIGO = [34, 26, 92];
+const CARDBOARD = [205, 160, 100];
+const CARDBOARD_DARK = [140, 100, 60];
+const TEXT = [240, 245, 255], SUB = [170, 225, 255], DIM = [120, 128, 175], SHADOW = [8, 6, 28];
+
+function disc(g, x, y, r, col) {
+  g.fillStyle = typeof col === 'string' ? col : css(col);
+  g.beginPath(); g.arc(x, y, Math.max(0.5, r), 0, Math.PI * 2); g.fill();
+}
+function ring(x, y, r, col, lw) {
+  ctx.strokeStyle = css(col); ctx.lineWidth = lw;
+  ctx.beginPath(); ctx.arc(x, y, Math.max(0.5, r - lw / 2), 0, Math.PI * 2); ctx.stroke();
+}
+function poly(pts, col) {
+  ctx.fillStyle = css(col);
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath(); ctx.fill();
+}
+function line(a, b, col, lw, g) {
+  g = g || ctx;
+  g.strokeStyle = typeof col === 'string' ? col : css(col); g.lineWidth = lw; g.lineCap = 'butt';
+  g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+}
+function rrPath(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function rr(x, y, w, h, r, col) { rrPath(x, y, w, h, r); ctx.fillStyle = typeof col === 'string' ? col : css(col); ctx.fill(); }
+function rrS(x, y, w, h, r, col, lw) {          // рамка внутри заданного прямоугольника
+  const k = lw / 2;
+  rrPath(x + k, y + k, w - lw, h - lw, Math.max(0, r - k));
+  ctx.strokeStyle = typeof col === 'string' ? col : css(col); ctx.lineWidth = lw; ctx.stroke();
+}
+function ellipseFill(cx, cy, rx, ry, col) {
+  ctx.fillStyle = css(col); ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2); ctx.fill();
+}
+function ellipseStroke(cx, cy, rx, ry, col, lw) {
+  ctx.strokeStyle = css(col); ctx.lineWidth = lw;
+  ctx.beginPath(); ctx.ellipse(cx, cy, rx - lw / 2, ry - lw / 2, 0, 0, Math.PI * 2); ctx.stroke();
+}
+function ellipseHalf(cx, cy, rx, ry, upper, col, lw) {
+  ctx.strokeStyle = css(col); ctx.lineWidth = lw;
+  ctx.beginPath();
+  if (upper) ctx.ellipse(cx, cy, rx, ry, 0, Math.PI, Math.PI * 2);
+  else ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI);
+  ctx.stroke();
+}
+function star4(cx, cy, r, col) {
+  const q = r * 0.25;
+  poly([[cx, cy - r], [cx + q, cy - q], [cx + r, cy], [cx + q, cy + q],
+        [cx, cy + r], [cx - q, cy + q], [cx - r, cy], [cx - q, cy - q]], col);
+}
+
+// ======================= ЗУФИРКА (витой зефир) =======================
+const ANGLES = [-0.55, 0.45, -0.2, 0.7, -0.8, 0.15];
+const spriteCache = new Map();
+
+function taper(u) { return 0.55 + 0.45 * Math.min(1, 6 * Math.min(u, 1 - u)); }
+
+function buildSprite(size, variant) {
+  const SS = SPR_SS;
+  const side = Math.floor(size * 1.2) + 6;
+  const c = document.createElement('canvas');
+  c.width = c.height = side * SS;
+  const g = c.getContext('2d');
+  const big = side * SS, length = size * SS, mid = big / 2;
+  const ang = ANGLES[variant % ANGLES.length];
+  const ux = Math.cos(ang), uy = Math.sin(ang), vx = -uy, vy = ux;
+  const half = 0.41 * length;
+  const helix = 0.075 * length, strandR = 0.088 * length, coreR = 0.10 * length;
+  const n = 64, twist = 2.1 * 2 * Math.PI, spin = variant * 0.8;
+
+  const items = [];
+  for (let j = 0; j <= n; j++) {
+    const u = j / n, f = taper(u);
+    const along = (u - 0.5) * 2 * half;
+    const px = mid + ux * along, py = mid + uy * along;
+    items.push({ d: 0, x: px, y: py, r: coreR * f, col: CORE, core: true });
+    for (let k = 0; k < 3; k++) {
+      const col = STRAND[(k + variant) % 3];
+      const ph = 2 * Math.PI * k / 3 + twist * u + spin;
+      const off = helix * Math.sin(ph) * f, depth = Math.cos(ph);
+      items.push({ d: depth, x: px + vx * off, y: py + vy * off,
+                   r: strandR * f * (0.93 + 0.07 * depth), col, core: false });
+    }
+  }
+  const ow = 1.8 * SS;
+  for (const it of items) disc(g, it.x, it.y, it.r + ow, OUTLINE);
+  items.sort((a, b) => a.d - b.d);
+  for (const it of items) {
+    if (it.core) { disc(g, it.x, it.y, it.r, it.col); continue; }
+    disc(g, it.x, it.y, it.r, shadeC(it.col, 0.72 + 0.28 * (it.d + 1) / 2));
+  }
+  const sign = vy > 0 ? -1 : 1;
+  const edge = (helix + strandR) * 0.72 * sign;
+  for (let j = 8; j < n - 7; j++) {
+    const along = (j / n - 0.5) * 2 * half;
+    disc(g, mid + ux * along + vx * edge, mid + uy * along + vy * edge, 0.014 * length, [255, 255, 255]);
+  }
+  return { c, side };
+}
+
+function getSprite(size, variant) {
+  const q = Math.max(8, Math.round(size / 4) * 4);
+  const v = ((Math.floor(variant) % 6) + 6) % 6;
+  const key = q * 10 + v;
+  let s = spriteCache.get(key);
+  if (!s) {
+    if (spriteCache.size > 120) spriteCache.clear();
+    s = buildSprite(q, v);
+    spriteCache.set(key, s);
+  }
+  return s;
+}
+
+function zufirka(x, y, size, variant) {
+  const s = getSprite(size, variant || 0);
+  ctx.drawImage(s.c, x - s.side / 2, y - s.side / 2, s.side, s.side);
+}
+
+// ======================= ПРЕДМЕТЫ ПО СТАДИЯМ =======================
+function heap(cx, baseY, width, m, rows) {
+  const step = m * 0.5;
+  for (let r = 0; r < rows; r++) {
+    const n = Math.max(1, Math.floor(width / step) - 2 * r);
+    const y = baseY - m * 0.22 - r * m * 0.34;
+    for (let k = 0; k < n; k++) zufirka(cx + (k - (n - 1) / 2) * step, y, m, k + 2 * r);
+  }
+}
+function crate(x, y, w, h) {
+  rr(x, y, w, h, 3, CARDBOARD);
+  rr(x + w * 0.4, y, w * 0.2, h, 0, [70, 200, 235]);
+  rrS(x, y, w, h, 3, CARDBOARD_DARK, 2);
+}
+function crateRows(cx, baseY, width, cw, ch, rows) {
+  const n0 = Math.max(1, Math.floor(width / cw));
+  for (let r = 0; r < rows; r++) {
+    const n = Math.max(1, n0 - r), y = baseY - ch * (r + 1);
+    for (let k = 0; k < n; k++) crate(cx + (k - n / 2) * cw, y, cw - 2, ch);
+  }
+}
+function container(x, y, w, h, col) {
+  const dark = shadeC(col, 0.7);
+  rr(x, y, w, h, 2, col);
+  for (let k = 1; k < 8; k++) line([x + w * k / 8, y + 2], [x + w * k / 8, y + h - 2], dark, 1);
+  rrS(x, y, w, h, 2, dark, 2);
+}
+function pouch(cx, cy, s) {
+  const w = s * 0.78, h = s * 0.96, x = cx - w / 2, y = cy - h / 2;
+  const crimp = Math.max(4, s * 0.09), rad = s * 0.05;
+  rr(x, y, w, h, rad, INDIGO);
+  rr(x + w * 0.07, y + crimp * 1.3, w * 0.86, h - crimp * 2.6, rad, VIOLET);
+  const py = cy - h * 0.16;
+  disc(ctx, cx, py, w * 0.2, [255, 170, 90]);
+  disc(ctx, cx - w * 0.04, py - w * 0.04, w * 0.13, [255, 205, 140]);
+  ellipseStroke(cx, py, w * 0.36, w * 0.07, [255, 232, 180], Math.max(2, s * 0.018));
+  zufirka(cx, cy + h * 0.2, w * 0.66, 2);
+  star4(x + w * 0.2, y + h * 0.28, Math.max(3, s * 0.05), GOLD);
+  star4(x + w * 0.82, y + h * 0.42, Math.max(2, s * 0.035), [255, 255, 255]);
+  star4(x + w * 0.78, y + h * 0.2, Math.max(2, s * 0.03), NEON);
+  for (const top of [y, y + h - crimp]) {
+    rr(x, top, w, crimp, rad / 2, [160, 130, 240]);
+    for (let k = 1; k < Math.floor(w / 5); k++) line([x + k * 5, top + 1], [x + k * 5, top + crimp - 2], [70, 48, 150], 1);
+  }
+  rrS(x, y, w, h, rad, NEON, Math.max(2, s * 0.022));
+}
+function threeZufirki(cx, cy, s) {
+  zufirka(cx - s * 0.2, cy + s * 0.14, s * 0.78, 0);
+  zufirka(cx + s * 0.2, cy + s * 0.14, s * 0.78, 1);
+  zufirka(cx, cy - s * 0.16, s * 0.78, 2);
+}
+function threePouches(cx, cy, s) {
+  pouch(cx, cy - s * 0.2, s * 0.64);
+  pouch(cx - s * 0.3, cy + s * 0.12, s * 0.64);
+  pouch(cx + s * 0.3, cy + s * 0.12, s * 0.64);
+}
+function sack(cx, cy, s) {
+  const plastic = [210, 226, 255], edge = [140, 160, 225];
+  const bw = s * 0.9, bh = s * 0.95, bx = cx - bw / 2, by = cy + s * 0.08 - bh / 2;
+  poly([[cx - s * 0.2, by + 4], [cx + s * 0.2, by + 4], [cx + s * 0.07, by - s * 0.14], [cx - s * 0.07, by - s * 0.14]], plastic);
+  poly([[cx, by - s * 0.07], [cx - s * 0.17, by - s * 0.17], [cx - s * 0.17, by + s * 0.03]], [60, 190, 235]);
+  poly([[cx, by - s * 0.07], [cx + s * 0.17, by - s * 0.17], [cx + s * 0.17, by + s * 0.03]], [60, 190, 235]);
+  rr(bx, by, bw, bh, s * 0.25, plastic);
+  rrS(bx, by, bw, bh, s * 0.25, edge, 4);
+  let n = 0;
+  for (const row of [-0.27, 0, 0.27]) for (const col of [-0.27, 0, 0.27]) zufirka(cx + s * col, cy + s * (0.08 + row), s * 0.36, n++);
+}
+function box(cx, cy, s) {
+  const bw = s * 0.9, bh = s * 0.62, bx = cx - bw / 2, by = cy - s * 0.05;
+  [-0.3, 0, 0.3].forEach((dx, n) => zufirka(cx + s * dx, by - s * 0.1, s * 0.4, n));
+  crate(bx, by, bw, bh);
+  poly([[bx, by], [bx + s * 0.17, by], [bx + s * 0.13, by - s * 0.14], [bx - s * 0.09, by - s * 0.1]], CARDBOARD);
+  poly([[bx + bw, by], [bx + bw - s * 0.17, by], [bx + bw - s * 0.13, by - s * 0.14], [bx + bw + s * 0.09, by - s * 0.1]], CARDBOARD);
+}
+function van(cx, cy, s, boxes) {
+  const roof = cy - s * 0.12;
+  if (boxes) {
+    crateRows(cx - s * 0.25, roof, s * 1.0, s * 0.32, s * 0.22, 2);
+    [[-0.86, 0], [-0.98, 0.15], [-0.78, 0.31], [-1.0, 0.31]].forEach(([dx, dy], n) => zufirka(cx + s * dx, cy + s * dy, s * 0.24, n));
+  } else {
+    heap(cx - s * 0.25, roof, s * 0.95, s * 0.3, 2);
+  }
+  rr(cx - s * 0.75, roof, s * 1.0, s * 0.36, 4, [240, 244, 255]);
+  rr(cx - s * 0.68, roof + s * 0.07, s * 0.86, s * 0.22, 4, VIOLET);
+  star4(cx - s * 0.5, roof + s * 0.18, s * 0.07, GOLD);
+  star4(cx - s * 0.15, roof + s * 0.14, s * 0.04, [255, 255, 255]);
+  rrS(cx - s * 0.75, roof, s * 1.0, s * 0.36, 4, [110, 120, 160], 4);
+  poly([[cx + s * 0.25, cy - s * 0.02], [cx + s * 0.52, cy - s * 0.02], [cx + s * 0.67, cy + s * 0.1],
+        [cx + s * 0.67, cy + s * 0.24], [cx + s * 0.25, cy + s * 0.24]], [60, 110, 210]);
+  poly([[cx + s * 0.34, cy + s * 0.01], [cx + s * 0.5, cy + s * 0.01], [cx + s * 0.6, cy + s * 0.1], [cx + s * 0.34, cy + s * 0.1]], [190, 235, 255]);
+  rr(cx - s * 1.1, cy + s * 0.36, s * 2.1, 4, 0, NEON);
+  for (const wx of [-0.5, 0.45]) {
+    disc(ctx, cx + s * wx, cy + s * 0.26, s * 0.1, [24, 24, 40]);
+    disc(ctx, cx + s * wx, cy + s * 0.26, s * 0.04, [170, 180, 210]);
+  }
+}
+function ship(cx, cy, s, cargo) {
+  const deck = cy + s * 0.12;
+  for (let k = 0; k < 4; k++) {
+    const fx = cx - s * 0.36 + k * s * 0.24;
+    rr(fx, deck - s * 0.85, s * 0.12, s * 0.85, 0, [235, 140, 60]);
+    rr(fx, deck - s * 0.85, s * 0.12, s * 0.08, 0, [30, 30, 40]);
+  }
+  rr(cx - s * 0.6, deck - s * 0.12, s * 1.2, s * 0.12, 0, [50, 56, 120]);
+  if (cargo === 'zefir') heap(cx, deck, s * 1.3, s * 0.3, 3);
+  else if (cargo === 'boxes') crateRows(cx, deck, s * 1.3, s * 0.3, s * 0.24, 3);
+  else {
+    const colors = [[200, 60, 80], [60, 110, 200], [70, 170, 110], [235, 150, 50]];
+    const cw = s * 0.33, ch = s * 0.2;
+    [4, 3].forEach((n, r) => { for (let k = 0; k < n; k++) container(cx + (k - n / 2) * cw, deck - ch * (r + 1), cw - 2, ch, colors[(k + r) % 4]); });
+  }
+  poly([[cx - s * 0.85, deck], [cx + s * 0.9, deck], [cx + s * 0.72, deck + s * 0.28], [cx - s * 0.7, deck + s * 0.28]], [22, 26, 62]);
+  poly([[cx - s * 0.72, deck + s * 0.2], [cx + s * 0.76, deck + s * 0.2], [cx + s * 0.72, deck + s * 0.28], [cx - s * 0.7, deck + s * 0.28]], [200, 50, 90]);
+  for (let k = 0; k < 10; k++) disc(ctx, cx - s * 0.65 + k * s * 0.16, deck + s * 0.08, s * 0.025, [255, 235, 160]);
+  rr(cx - s, deck + s * 0.22, s * 2.0, s * 0.14, 6, [76, 70, 200]);
+  for (let k = 0; k < 7; k++) {
+    disc(ctx, cx - s * 0.9 + k * s * 0.3, deck + s * 0.22, s * 0.05, [76, 70, 200]);
+    disc(ctx, cx - s * 0.9 + k * s * 0.3, deck + s * 0.25, s * 0.015, [120, 210, 255]);
+  }
+}
+function blackhole(cx, cy, s, t) {
+  for (let k = 0; k < 6; k++) {
+    const f = k / 5;
+    disc(ctx, cx, cy, s * (0.62 - 0.07 * k), [Math.round(150 - 130 * f), Math.round(90 - 90 * f), Math.round(190 - 140 * f)]);
+  }
+  const swirl = back => {
+    for (let k = 0; k < 8; k++) {
+      const ang = t * 1.6 + k * 0.85;
+      if ((Math.sin(ang) < 0) !== back) continue;
+      const r = s * (0.95 - 0.09 * k);
+      zufirka(cx + r * Math.cos(ang), cy + r * Math.sin(ang) * 0.32, s * (0.3 - 0.026 * k), k);
+    }
+  };
+  swirl(true);
+  const lw = Math.max(3, s * 0.05);
+  ellipseStroke(cx, cy, s * 0.85, s * 0.14, [255, 150, 90], lw);
+  ellipseStroke(cx, cy, s * 0.7, s * 0.1, [255, 215, 140], 3);
+  disc(ctx, cx, cy, s * 0.3, [0, 0, 0]);
+  ellipseHalf(cx, cy, s * 0.85 - lw / 2, s * 0.14 - lw / 2, false, [255, 150, 90], lw);   // ближняя часть диска
+  swirl(false);
+}
+function drawItem(stage, cx, cy, scale, t) {
+  const s = 220 * scale;
+  cy += 4 * Math.sin(t * 2.2);
+  switch (stage) {
+    case 0: zufirka(cx, cy, s * 1.05, 0); break;
+    case 1: threeZufirki(cx, cy, s); break;
+    case 2: pouch(cx, cy, s); break;
+    case 3: threePouches(cx, cy, s); break;
+    case 4: sack(cx, cy, s); break;
+    case 5: box(cx, cy, s); break;
+    case 6: van(cx + s * 0.1, cy, s, false); break;
+    case 7: van(cx + s * 0.1, cy, s, true); break;
+    case 8: ship(cx, cy, s, 'zefir'); break;
+    case 9: ship(cx, cy, s, 'boxes'); break;
+    case 10: ship(cx, cy, s, 'containers'); break;
+    default: blackhole(cx, cy, s, t);
+  }
+}
+
+// ======================= КОСМИЧЕСКИЙ ФОН =======================
+function rng(seed) {                 // небольшой детерминированный генератор
+  let a = seed >>> 0;
+  return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+function glowSprite(radius, col, maxAlpha) {     // круг, который к центру становится плотнее
+  const c = document.createElement('canvas');
+  c.width = c.height = Math.ceil(radius * 2);
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(radius, radius, 0, radius, radius, radius);
+  for (let i = 0; i <= 10; i++) {
+    const d = i / 10;
+    grad.addColorStop(d, css(col, (maxAlpha / 255) * Math.pow(1 - d, 2)));
+  }
+  g.fillStyle = grad; g.fillRect(0, 0, c.width, c.height);
+  return c;
+}
+
+const space = {
+  stars: [], shoot: null, nextShoot: 4, bg: null, rand: rng(7),
+  init() {
+    const r = this.rand;
+    for (let i = 0; i < 110; i++) this.stars.push({ x: 4 + r() * (W - 8), y: 4 + r() * 1290,
+      r: r() < 0.25 ? 2 : 1, ph: r() * 6.28, sp: 0.7 + r() * 1.7 });
+  },
+  rebuild() {
+    const c = document.createElement('canvas');
+    c.width = cv.width; c.height = cv.height;
+    const g = c.getContext('2d');
+    g.setTransform(pxScale, 0, 0, pxScale, 0, 0);
+    const grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, 'rgb(6,8,30)'); grad.addColorStop(1, 'rgb(36,14,72)');
+    g.fillStyle = grad; g.fillRect(0, 0, W, H);
+    const neb = (cx, cy, r, col, a) => { const s = glowSprite(r, col, a); g.drawImage(s, cx - r, cy - r, r * 2, r * 2); };
+    neb(110, H * 0.22, 250, [120, 70, 210], 62);
+    neb(440, H * 0.16, 210, [40, 130, 210], 62);
+    neb(360, H * 0.58, 260, [210, 60, 150], 50);
+    // планета с кольцом
+    const px = 462, py = L.itemCY - 108, pr = 24, rx = pr * 1.9, ry = pr * 0.42;
+    const half = (upper) => { g.strokeStyle = css([255, 226, 170]); g.lineWidth = 5; g.beginPath();
+      g.ellipse(px, py, rx, ry, 0, upper ? Math.PI : 0, upper ? Math.PI * 2 : Math.PI); g.stroke(); };
+    half(true);
+    disc(g, px, py, pr, [226, 140, 92]);
+    disc(g, px - pr * 0.14, py - pr * 0.14, pr * 0.8, [248, 192, 128]);
+    disc(g, px - pr * 0.3, py - pr * 0.3, pr * 0.34, [255, 222, 170]);
+    half(false);
+    // луна
+    const mx = 52, my = L.itemCY + 112, mr = 15;
+    disc(g, mx, my, mr, [150, 156, 190]);
+    disc(g, mx - mr * 0.15, my - mr * 0.15, mr * 0.82, [190, 196, 224]);
+    [[-0.3, -0.1, 0.2], [0.25, 0.25, 0.16], [0.1, -0.4, 0.12]].forEach(([dx, dy, cr]) => disc(g, mx + mr * dx, my + mr * dy, mr * cr, [150, 156, 190]));
+    this.bg = c;
+  },
+  update(dt) {
+    this.nextShoot -= dt;
+    if (!this.shoot && this.nextShoot <= 0) {
+      this.shoot = { x: 140 + this.rand() * (W - 140), y: 10 + this.rand() * 230, age: 0 };
+      this.nextShoot = 5 + this.rand() * 6;
+    }
+    if (this.shoot) { this.shoot.age += dt; if (this.shoot.age > 0.9) this.shoot = null; }
+  },
+  draw(t) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(this.bg, 0, 0);
+    ctx.setTransform(pxScale, 0, 0, pxScale, 0, 0);
+    for (const s of this.stars) {
+      if (s.y > H) continue;
+      const b = 0.55 + 0.45 * Math.sin(t * s.sp + s.ph);
+      const col = [Math.round(255 * b), Math.round(255 * b), Math.round(235 * b)];
+      if (s.r === 2) { line([s.x - 4, s.y], [s.x + 4, s.y], col, 1); line([s.x, s.y - 4], [s.x, s.y + 4], col, 1); }
+      disc(ctx, s.x, s.y, s.r, col);
+    }
+    if (this.shoot) {
+      const { x, y, age } = this.shoot, fade = 1 - age / 0.9;
+      const hx = x - 380 * age, hy = y + 220 * age;
+      for (let k = 0; k < 8; k++) {
+        const a0 = k / 8, a1 = (k + 1) / 8, v = Math.round(255 * fade * (1 - a0));
+        line([hx + 60 * a0, hy - 35 * a0], [hx + 60 * a1, hy - 35 * a1], [v, v, v], Math.max(1, 4 - Math.floor(k / 2)));
+      }
+      star4(hx, hy, 6 * fade + 1, [255, 255, 255]);
+    }
+  },
+};
+space.init();
+
+// ======================= ИНТЕРФЕЙС =======================
+const FONT = '"Roboto", "Noto Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif';
+function fitSize(text, maxW, size) {
+  while (size > 12) {
+    ctx.font = `bold ${size}px ${FONT}`;
+    if (ctx.measureText(text).width <= maxW) return size;
+    size--;
+  }
+  return 12;
+}
+function drawText(text, x, y, col, size, maxW, align) {
+  size = fitSize(text, maxW, size);
+  ctx.font = `bold ${size}px ${FONT}`;
+  ctx.textAlign = align || 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = css(col);
+  ctx.fillText(text, x, y);
+  return size;
+}
+
+function iconBolt(cx, cy, s, on) {
+  const col = on ? GOLD : [120, 122, 160], k = s / 2;
+  poly([[0.2, -1], [-0.6, 0.15], [-0.05, 0.15], [-0.25, 1], [0.6, -0.25], [0.05, -0.25]].map(p => [cx + p[0] * k, cy + p[1] * k]), col);
+}
+function iconClock(cx, cy, s, on) {
+  const col = on ? NEON : [120, 122, 160], r = s / 2;
+  ring(cx, cy, r, col, 3);
+  line([cx, cy], [cx, cy - r * 0.6], col, 3);
+  line([cx, cy], [cx + r * 0.45, cy + r * 0.1], col, 3);
+  disc(ctx, cx, cy, 3, col);
+}
+function iconZufirka(cx, cy, s) { zufirka(cx, cy, s * 1.5, 1); }
+
+function button(rect, title, sub, on, icon) {
+  const [x, y, w, h] = rect;
+  rr(x, y, w, h, 18, on ? [28, 54, 108] : [24, 22, 54]);
+  if (on) rr(x + 5, y + 5, w - 10, h * 0.38, 14, [44, 86, 156]);
+  rrS(x, y, w, h, 18, on ? NEON : [72, 72, 124], 3);
+  const maxW = w - 36 - 78;
+  drawText(title, x + 18, y + 14 + 15, on ? TEXT : DIM, 26, maxW, 'left');
+  drawText(sub, x + 18, y + 14 + 15 + 38, on ? SUB : DIM, 20, maxW, 'left');
+  icon(x + w - 46, y + h / 2, 40, on);
+}
+
+let glowCache = null;
+function render(game, pulse, floaters, t) {
+  space.draw(t);
+  ctx.setTransform(pxScale, 0, 0, pxScale, 0, 0);
+
+  // счётчик
+  const title = `${CURRENCY}: ${fmt(game.coins)}`;
+  const size = fitSize(title, W - 130, 40);
+  ctx.font = `bold ${size}px ${FONT}`;
+  const tw = ctx.measureText(title).width;
+  const x0 = (W - (tw + 52)) / 2;
+  zufirka(x0 + 22, 52, 46, 1);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = css(SHADOW); ctx.fillText(title, x0 + 54, 54);
+  ctx.fillStyle = css(TEXT); ctx.fillText(title, x0 + 52, 52);
+  drawText(`+${fmt(game.perSecond)} в секунду`, W / 2, 98, SUB, 20, W - 40);
+
+  // свечение и предмет
+  if (!glowCache) glowCache = glowSprite(200, [130, 90, 255], 80);
+  ctx.globalAlpha = (150 + 60 * Math.sin(t * 1.8)) / 255;
+  ctx.drawImage(glowCache, W / 2 - 200, L.itemCY - 200, 400, 400);
+  ctx.globalAlpha = 1;
+  drawItem(game.stage, W / 2, L.itemCY, L.itemScale * (1 - 0.08 * pulse), t);
+
+  drawText(STAGES[game.stage].name, W / 2, L.nameY, TEXT, 30, W - 40);
+  drawText(`+${fmt(game.clickReward)} за тап  •  вид ${game.stage + 1}/${STAGES.length}`, W / 2, L.infoY, SUB, 20, W - 40);
+
+  for (const f of floaters) {
+    ctx.globalAlpha = clamp(f.life, 0, 1);
+    drawText(f.text, f.x, f.y, GOLD, 28, 200);
+  }
+  ctx.globalAlpha = 1;
+
+  // магазин
+  rr(0, L.shopTop, W, H - L.shopTop + 40, 28, [10, 8, 38]);
+  rrS(0, L.shopTop, W, H - L.shopTop + 40, 28, NEON, 3);
+  drawText('Магазин', W / 2, L.shopTop + 26, TEXT, 26, 200);
+  star4(W / 2 - 80, L.shopTop + 26, 8, GOLD);
+  star4(W / 2 + 80, L.shopTop + 26, 8, NEON);
+  const nxt = game.nextStage;
+  if (nxt) button(L.buttons.stage, nxt.name, `Улучшить за ${fmt(nxt.cost)}  •  награда x${fmt(nxt.mult)}`, game.coins >= nxt.cost, iconZufirka);
+  else button(L.buttons.stage, 'Максимальный вид!', 'Больше улучшений нет', false, iconZufirka);
+  button(L.buttons.power, `Сила клика (ур. ${game.powerLevel})`, `Цена: ${fmt(game.powerCost)}  •  +1 к награде за тап`, game.coins >= game.powerCost, iconBolt);
+  button(L.buttons.auto, `Автоклик (ур. ${game.autoLevel})`, `Цена: ${fmt(game.autoCost)}  •  +1 авто-тап в секунду`, game.coins >= game.autoCost, iconClock);
+}
+
+// ======================= ЦИКЛ И УПРАВЛЕНИЕ =======================
+const game = new Game();
+{
+  const text = readSave();
+  if (text) game.load(text);
+}
+let pulse = 0, floaters = [], dirty = false, sinceSave = 0, last = null, time = 0;
+
+function inside(r, x, y) { return x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]; }
+function saveNow() { writeSave(game); dirty = false; sinceSave = 0; }
+
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const b = cv.getBoundingClientRect();
+  const x = (e.clientX - b.left) / b.width * W, y = (e.clientY - b.top) / b.height * H;
+  if (inside(L.itemRect, x, y)) {
+    const gain = game.click();
+    pulse = 1; dirty = true;
+    floaters.push({ x, y: y - 20, text: '+' + fmt(gain), life: 1 });
+  } else {
+    let bought = false;
+    if (inside(L.buttons.stage, x, y)) bought = game.buyStage();
+    else if (inside(L.buttons.power, x, y)) bought = game.buyPower();
+    else if (inside(L.buttons.auto, x, y)) bought = game.buyAuto();
+    if (bought) saveNow();
+  }
+}, { passive: false });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+function frame(ts) {
+  if (last === null) last = ts;
+  const dt = Math.min((ts - last) / 1000, 0.1);
+  last = ts; time += dt;
+  if (game.tick(dt)) dirty = true;
+  pulse = Math.max(0, pulse - dt * 6);
+  for (const f of floaters) { f.y -= 70 * dt; f.life -= dt * 1.2; }
+  floaters = floaters.filter(f => f.life > 0);
+  sinceSave += dt;
+  if (dirty && sinceSave >= 1) saveNow();
+  space.update(dt);
+  render(game, pulse, floaters, time);
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 100));
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); else last = null; });
+window.addEventListener('pagehide', saveNow);
+window.__saveNow = saveNow;
+window.__zf = { game, STAGES, fmt, Game, spriteCache, get layout() { return L; } };
+
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- звёзды -->
+    <path
+        android:fillColor="#FFE178"
+        android:pathData="M30,34 L31.5,38.5 L36,40 L31.5,41.5 L30,46 L28.5,41.5 L24,40 L28.5,38.5 Z" />
+    <path
+        android:fillColor="#5AE1FF"
+        android:pathData="M80,68 L81,71 L84,72 L81,73 L80,76 L79,73 L76,72 L79,71 Z" />
+
+    <!-- планета -->
+    <path
+        android:fillColor="#FFAA5A"
+        android:pathData="M54,54 m-17,0 a17,17 0 1,0 34,0 a17,17 0 1,0 -34,0" />
+    <path
+        android:fillColor="#FFCD8C"
+        android:pathData="M51,51 m-11,0 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0" />
+
+    <!-- кольцо -->
+    <path
+        android:pathData="M54,54 m-30,0 a30,8 0 1,0 60,0 a30,8 0 1,0 -60,0"
+        android:strokeColor="#FFE8B4"
+        android:strokeWidth="3" />
+
+    <!-- зуфирка: капсула с косыми цветными полосами -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-35">
+        <clip-path android:pathData="M42,46 L66,46 A8,8 0 0 1 66,62 L42,62 A8,8 0 0 1 42,46 Z" />
+        <path android:fillColor="#FFFFFF" android:pathData="M30,40 L80,40 L80,68 L30,68 Z" />
+        <path android:fillColor="#FF8CBC" android:pathData="M32,44 L40,44 L36,64 L28,64 Z" />
+        <path android:fillColor="#70BCFF" android:pathData="M40,44 L48,44 L44,64 L36,64 Z" />
+        <path android:fillColor="#FFE070" android:pathData="M48,44 L56,44 L52,64 L44,64 Z" />
+        <path android:fillColor="#FF8CBC" android:pathData="M56,44 L64,44 L60,64 L52,64 Z" />
+        <path android:fillColor="#70BCFF" android:pathData="M64,44 L72,44 L68,64 L60,64 Z" />
+        <path android:fillColor="#FFE070" android:pathData="M72,44 L80,44 L76,64 L68,64 Z" />
+    </group>
+</vector>
